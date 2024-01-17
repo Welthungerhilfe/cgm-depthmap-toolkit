@@ -2,7 +2,31 @@ import numpy as np
 from skimage.restoration import inpaint
 
 
-def replace_values_above_threshold(depth_map, threshold, expected_shape=(240, 180, 1)):
+def replace_values_above_threshold_by_zero(depth_map, threshold, expected_shape=(240, 180, 1)):
+    """
+    Replace depth values in a depth map above a given threshold with 0.
+
+    Args:
+    - depth_map (numpy.ndarray): The input depth map.
+    - threshold (float): The threshold value.
+    - expected_shape (tuple): The expected shape of the input depth map.
+
+    Returns:
+    - numpy.ndarray: The depth map with values above the threshold replaced by 0.
+    """
+    # Ensure depth_map has the expected shape
+    if depth_map.shape != expected_shape:
+        raise ValueError(f"Input depth_map should have a shape of {expected_shape}")
+
+    # Create a binary mask for values above the threshold
+    above_threshold_mask = depth_map > threshold
+
+    # Set values above the threshold to 0
+    depth_map[above_threshold_mask] = 0
+
+    return depth_map
+
+def replace_values_above_threshold_by_neighbor(depth_map, threshold, expected_shape=(240, 180, 1)):
     """
     Replace depth values in a depth map above a given threshold with the average
     of their four non-zero neighbors.
