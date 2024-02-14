@@ -354,13 +354,13 @@ class Depthmap:
 
         return mask
 
-    def detect_floor(self, floor: float) -> np.ndarray:
+    def detect_floor(self, floor: float, floor_plane_channel:int=1) -> np.ndarray:
         mask = np.zeros((self.width, self.height))
         assert self.depthmap_arr_smooth.shape == (self.width, self.height)
         mask[self.depthmap_arr_smooth == 0] = MASK_INVALID
 
         points_3d_arr = self.convert_2d_to_3d_oriented(should_smooth=True)
-        cond = (points_3d_arr[1, :, :] - floor) < FLOOR_THRESHOLD_IN_METER
+        cond = (points_3d_arr[floor_plane_channel, :, :] - floor) < FLOOR_THRESHOLD_IN_METER
         mask[cond] = MASK_FLOOR
         return mask
 
@@ -454,18 +454,27 @@ class Depthmap:
         camera = matrix_transform_point([0, 0, 0], self.device_pose_arr)
         return math.degrees(math.atan2(camera[0] - forward[0], camera[2] - forward[2])) - 90.
 
-    def get_floor_level(self) -> float:
-        """Calculate an altitude of the floor in the world coordinates"""
+    def get_floor_level(self, floor_plane_channel:int=1) -> float:
+        """Calculate an altitude of the floor in the world coordinates
+
+        Args:
+            floor_plane_channel (int, optional): _description_. Defaults to 1.
+            The channel that whose asociated world plane is parallel to the floor
+
+        Returns:
+            float: _description_
+        """
 
         # Get normal vectors
         mask = np.zeros((self.width, self.height))
         assert self.depthmap_arr_smooth.shape == (self.width, self.height)
         mask[self.depthmap_arr_smooth == 0] = MASK_INVALID
+        
         points_3d_arr = self.convert_2d_to_3d_oriented(should_smooth=True)
         normal = self.calculate_normalmap_array(points_3d_arr)
 
-        cond = np.abs(normal[1, :, :]) > 0.5
-        selection_of_points = points_3d_arr[1, :, :][cond]
+        cond = np.abs(normal[floor_plane_channel, :, :]) > 0.5
+        selection_of_points = points_3d_arr[floor_plane_channel, :, :][cond]
         median = np.median(selection_of_points)
         return median
 
