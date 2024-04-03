@@ -166,7 +166,7 @@ class PlaneExtractor:
         """
         # get the surface normals for the lower 15% of the image
         lower_normals = self.normals[int(.85*self.shape[0]):, :, :].reshape(-1, 3)
-        lower_normals = lower_normals[np.logical_not(np.isnan(lower_normals))].reshape(-1, 3)
+        lower_normals = lower_normals[np.logical_not(np.any(np.isnan(lower_normals), axis=1)), :]
 
         # compute the average normal of lower region as estimate for the floor normal
         average_normal = np.average(lower_normals, axis=0)
@@ -205,7 +205,7 @@ class PlaneExtractor:
         """
         # get the surface normals for the upper 15% of the image
         upper_normals = self.normals[:int(.15*self.shape[0]), :, :].reshape(-1, 3)
-        upper_normals = upper_normals[np.logical_not(np.isnan(upper_normals))].reshape(-1, 3)
+        upper_normals = upper_normals[np.logical_not(np.any(np.isnan(upper_normals), axis=1)), :]
 
         # compute the average normal of upper region as estimate for the wall normal
         average_normal = np.average(upper_normals, axis=0)
