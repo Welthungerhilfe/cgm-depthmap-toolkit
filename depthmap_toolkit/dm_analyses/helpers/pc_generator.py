@@ -20,17 +20,98 @@ class PCGenerator:
     """
     Class that provides depthmap to point cloud conversion
     """
-    def __init__(self, depthmap, fov=(42.5, 54.8), pitch=0):
+    def __init__(self, depthmap, camera_parameters=(42.5, 54.8), pitch=0):
         """
         :param depthmap:    depth map to convert
-        :param fov:         field of view angles of recording camera
+        :param camera_parameters:  
+            if 2 values : field of view angles of recording camera
+            if 4 values : camera calibration (should be the preferred option)
         :param pitch:       pitch angle of the recording
         """
         self.depthmap = depthmap.squeeze()
         self.img_size = depthmap.shape[:2]
-        self.fov = fov
         self.pitch = pitch
+        self.fov = (-1,-1)
+        self.fy = -1
+        self.fx = -1
+        self.cy = -1
+        self.cx = -1
 
+        # update parameters 
+        if len(camera_parameters) == 2:
+            self.set_fov(camera_parameters)
+        elif len(camera_parameters) == 4:
+            self.set_intrinsics(camera_parameters)
+        else:
+            print('Error: invalid camera parameters provided')
+            return        
+
+    def set_fov(self, fov):
+        self.fov = fov
+        self.fy, self.fx, self.cy, self.cx = self.compute_focal_length_from_fov()
+
+    def set_intrinsics(self, intrinsics):
+        """ set intrinsic parameters"""
+        fx, fy, cx, cy = intrinsics
+
+        # scale intrinsics to correct depth image size
+        height, width = self.img_size
+        self.fx = fx * width 
+        self.fy = fy * height
+        self.cx = cx * width
+        self.cy = cy * height
+
+        self.compute_fov_from_calibration()
+
+    def compute_fov_from_calibration(self):
+        # Compute horizontal and vertical FOV in degrees
+        fov_x = 2 * np.degrees(np.arctan(self.img_size[1] / (2 * self.fx)))
+        fov_y = 2 * np.degrees(np.arctan(self.img_size[0] / (2 * self.fy)))
+
+        self.fov = (fov_y, fov_x)
+    
+    def compute_focal_length_from_fov(self):
+        height, width = self.img_size
+        # Convert FOV from degrees to radians
+        fov_x_rad = np.radians(self.fov[1])
+        fov_y_rad = np.radians(self.fov[0])
+        
+        # Calculate focal lengths for x and y directions
+        cx = (width / 2)
+        cy = (height / 2)
+        fx = cx / np.tan(fov_x_rad / 2)
+        fy = cy / np.tan(fov_y_rad / 2)
+        
+        return fy, fx, cy, cx
+
+    def depth_pixel_to_point_rs(self, value, coords):
+        """ 
+        deprojects depth pixel to 3d point the same way as in realsense code 
+        but without applying a distortion model for now
+
+        :param value: depth map value form outside mus match
+        :param coords: pixel coordinates
+        :return: x,y,z coordinates for 3d point
+        """
+        # Calculate the 3D coordinates
+        depth = self.depthmap[coords]
+        if value != depth:
+            print("value does not match internal depthmap")
+
+        y = (coords[0] - self.cy) / self.fy
+        x = (coords[1] - self.cx) / self.fx
+
+        #TODO add distortion models rs2_deproject_pixel_to_point
+
+        x = depth * x
+        y = depth * y
+        z = depth
+
+        # Stack to create an Nx3 array of 3D points
+        # points_3d = np.stack((X, Y, Z), axis=-1)
+        return x, y, z
+
+    # TODO use internal depthmap of pont cloud
     def depth_pixel_to_point(self, value, coords):
         """
         Converts single depth pixel to a point.
@@ -40,7 +121,9 @@ class PCGenerator:
         """
         x = coords[1]
         y = coords[0]
-        z = value
+        z = self.depthmap[y,x]
+        if value != z:
+            print("value does not match internal depthmap")
 
         fov_x = math.radians(self.fov[0])
         fov_y = math.radians(self.fov[1])
@@ -72,9 +155,9 @@ class PCGenerator:
         :return:    list of points converted from the depth map pixels
         """
         if pixel_list is None:
-            pc = [self.depth_pixel_to_point(pix, idx) for idx, pix in np.ndenumerate(self.depthmap) if 3 > pix > 0]
+            pc = [self.depth_pixel_to_point_rs(pix, idx) for idx, pix in np.ndenumerate(self.depthmap) ]
         else:
-            pc = [self.depth_pixel_to_point(pix, idx) for idx, pix in np.ndenumerate(self.depthmap) if 3 > pix > 0 if idx[::-1] in pixel_list]
+            pc = [self.depth_pixel_to_point_rs(pix, idx) for idx, pix in np.ndenumerate(self.depthmap) if idx[::-1] in pixel_list]
 
         pc = np.array(pc)
 
@@ -83,19 +166,21 @@ class PCGenerator:
 
         return pc
 
-    def generate_pixelmap(self):
+    def generate_pixelmap(self, near=0, far=4000):
         """
         Convert the depth map into a 2d list of points.
 
         The shape of the list is equal to the depth map's shape.
-        :return:
+        :param near: shortest distance of considert data
+        :param far: longest distance of considert data
+        :return: map of 3d points converted from the depth map pixels
         """
         shape = list(self.depthmap.shape) + [3]
         pc = np.zeros(shape)
 
         for idx, pix in np.ndenumerate(self.depthmap):
-            if 0 < pix < 3:
-                pc[idx[0], idx[1], :] = self.depth_pixel_to_point(pix, idx)
+            if near < pix < far:
+                pc[idx[0], idx[1], :] = self.depth_pixel_to_point_rs(pix, idx)
 
         if self.pitch != 0:
             pc = np.array([get_pitch_matrix(self.pitch) @ pc[idx[0], idx[1], :] for idx, _ in np.ndenumerate(pc[:, :, 0])]).reshape(shape)
