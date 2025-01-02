@@ -44,7 +44,7 @@ class PlaneModel(Model):
         self.origin = samples[0, :]
         v1 = samples[1, :] - self.origin
         v2 = samples[2, :] - self.origin
-        v3 = samples[2, :] - samples[1, :]
+        #v3 = samples[2, :] - samples[1, :]
 
         self.n = np.cross(v1, v2)
         self.n = self.n / np.linalg.norm(self.n)
@@ -139,17 +139,21 @@ class PlaneExtractor:
     """
     Class for plane extractions from point clouds
     """
-    def __init__(self, pc, include, normals, *, threshold=0.1, iterations=30):
+    def __init__(self, pc, normals, *, include=None, threshold=0.1, iterations=30):
         """
         :param pc:          point cloud
         :param include:     filter for points that shall be used
         :param normals:     surface normals at point locations (same shape as pc)
-        :param threshold:   threshold for error to distinguish outliers
+        :param threshold:   distance threshold from point to plane in cm to distinguish outliers
         :param iterations:  number of repetitions of plane fitting
         """
         self.pc = deepcopy(pc)
         self.out = deepcopy(pc)
-        self.include = include
+
+        if include is None:
+            self.include = np.ones(normals.shape[:2], dtype='bool')
+        else:
+            self.include = include
 
         self.shape = pc.shape[:2]
 
@@ -159,7 +163,25 @@ class PlaneExtractor:
         self.threshold = threshold
         self.iterations = iterations
 
-    def get_floor(self):
+    def get_plane(self, selection):
+        """
+        Run plane fitting (ransac) on given pixel selection
+        :param selection: pixel mask used for plane fitting
+        """
+
+        if np.count_nonzero(selection) == 0:
+            print('error empty selection provided')
+            return
+
+        # use ransac to get optimal fitting plane
+        floor_plane, inliers, _ = ransac(self.pc, self.threshold, self.iterations, include=selection,
+                                         model_class=PlaneModel, 
+                                         expected_normal=None)
+                                         
+        outliers = np.logical_and(self.include, np.logical_not(inliers))
+
+        return floor_plane, inliers, outliers
+
         """
         Get floor from point cloud self.pc
         :return: PlaneModel for wall, list of points in plane, list of points out of plane
@@ -171,13 +193,13 @@ class PlaneExtractor:
         # compute the average normal of lower region as estimate for the floor normal
         average_normal = np.average(lower_normals, axis=0)
         average_normal = average_normal / np.linalg.norm(average_normal)
+        
+            # filter points if angle between surface normal and average normal is greater than 30°
+            possible_floor = np.abs(np.dot(self.normals, average_normal)) > 3 ** .5 / 2
+            possible_floor[:int(.5 * self.shape[0]), :] = False
 
-        # filter points if angle between surface normal and average normal is greater than 30°
-        possible_floor = np.abs(np.dot(self.normals, average_normal)) > 3 ** .5 / 2
-        possible_floor[:int(.5 * self.shape[0]), :] = False
-
-        # combine point filters
-        include = np.bitwise_and(self.include, possible_floor)
+            # combine point filters
+            include = np.bitwise_and(self.include, possible_floor)
 
         # define sampling criteria
         # 1st: bottom left corner of image
@@ -211,12 +233,12 @@ class PlaneExtractor:
         average_normal = np.average(upper_normals, axis=0)
         average_normal = average_normal / np.linalg.norm(average_normal)
 
-        # filter points if angle between surface normal and average normal is greater than 30°
-        possible_wall = np.abs(np.dot(self.normals, average_normal)) > 3 ** .5 / 2
-        possible_wall[int(.5 * self.shape[0]):, :] = False
+             # filter points if angle between surface normal and average normal is greater than 30°
+            possible_wall = np.abs(np.dot(self.normals, average_normal)) > 3 ** .5 / 2
+            possible_wall[int(.5 * self.shape[0]):, :] = False
 
-        # combine point filters
-        include = np.bitwise_and(self.include, possible_wall)
+            # combine point filters
+            include = np.bitwise_and(self.include, possible_wall)
 
         # define sampling criteria
         # 1st: upper left corner of image
