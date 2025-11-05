@@ -320,10 +320,11 @@ class RGBDepthProcessor:
 
     def inpaint_depth_by_rowwise_mean(self, depth, mask, max_depth=3.0):
         """
-        Inpaint missing values in depth using row-wise IQR mean.
-        - If >10% of row is missing, sample randomly in (mean-0.1, mean+0.1).
-        - Otherwise, use normal IQR mean.
-        - If the entire row is missing, check adjacent rows (left or right) for valid depth and adjust.
+        Inpaint missing values in depth using row-wise logic:
+        - <10% missing → fill with row IQR mean
+        - ≥10% and <100% → sample from row IQR mean ± 0.1
+        - 100% missing → use adjacent row(s) with same logic
+        - If all else fails → sample from overall mean ± 0.1
         """
         inpainted = depth.copy()
         height, width = depth.shape
@@ -331,7 +332,7 @@ class RGBDepthProcessor:
         mask_valid = (mask > 0)
         depth_valid = (depth > 0) & (depth <= max_depth)
         overall_valid_mask = mask_valid & depth_valid
-        overall_mask_mean = depth[overall_valid_mask].mean() if np.any(overall_valid_mask) else 0
+        overall_mask_mean = depth[overall_valid_mask].mean() if np.any(overall_valid_mask) else 0.0
 
         rng = np.random.default_rng()
 
@@ -339,7 +340,7 @@ class RGBDepthProcessor:
             row_mask = mask_valid[row, :]
             row_depth = depth[row, :]
             valid_row = row_mask & (row_depth > 0) & (row_depth <= max_depth)
-            
+
             missing_row = row_mask & ((row_depth == 0) | (row_depth > max_depth))
             missing_ratio = np.sum(missing_row) / np.sum(row_mask) if np.sum(row_mask) > 0 else 1.0
 
@@ -350,34 +351,26 @@ class RGBDepthProcessor:
                 iqr_values = row_valid_depths[(row_valid_depths >= q1) & (row_valid_depths <= q3)]
                 row_mean = iqr_values.mean() if len(iqr_values) > 0 else row_valid_depths.mean()
 
-                if missing_ratio > 0.1:
-                    # Sample randomly around the overall_mask_mean
-                    low = overall_mask_mean - 0.1
-                    high = overall_mask_mean + 0.1
-                    sampled_values = rng.uniform(low, high, size=np.sum(missing_row))
-                else:
+                if missing_ratio < 0.1:
                     sampled_values = np.full(np.sum(missing_row), row_mean)
+                else:
+                    sampled_values = rng.uniform(row_mean - 0.1, row_mean + 0.1, size=np.sum(missing_row))
+
             else:
-                # Entire row invalid — check adjacent rows (left or right)
-                above = row - 1 if row > 0 else None
-                below = row + 1 if row < height - 1 else None
+                # Entire row missing — check adjacent rows
                 means = []
-                if above is not None:
-                    valid_above = mask_valid[above, :] & (depth[above, :] > 0) & (depth[above, :] < max_depth)
-                    if np.any(valid_above):
-                        row_valid_above = depth[above, :][valid_above]
-                        q1_above = np.percentile(row_valid_above, 25)
-                        q3_above = np.percentile(row_valid_above, 75)
-                        iqr_above = row_valid_above[(row_valid_above >= q1_above) & (row_valid_above <= q3_above)]
-                        means.append(iqr_above.mean() if len(iqr_above) > 0 else row_valid_above.mean())
-                if below is not None:
-                    valid_below = mask_valid[below, :] & (depth[below, :] > 0) & (depth[below, :] < max_depth)
-                    if np.any(valid_below):
-                        row_valid_below = depth[below, :][valid_below]
-                        q1_below = np.percentile(row_valid_below, 25)
-                        q3_below = np.percentile(row_valid_below, 75)
-                        iqr_below = row_valid_below[(row_valid_below >= q1_below) & (row_valid_below <= q3_below)]
-                        means.append(iqr_below.mean() if len(iqr_below) > 0 else row_valid_below.mean())
+                for adj_row in [row - 1, row + 1]:
+                    if 0 <= adj_row < height:
+                        adj_mask = mask_valid[adj_row, :]
+                        adj_depth = depth[adj_row, :]
+                        valid_adj = adj_mask & (adj_depth > 0) & (adj_depth <= max_depth)
+                        if np.any(valid_adj):
+                            adj_valid_depths = adj_depth[valid_adj]
+                            q1 = np.percentile(adj_valid_depths, 25)
+                            q3 = np.percentile(adj_valid_depths, 75)
+                            iqr_adj = adj_valid_depths[(adj_valid_depths >= q1) & (adj_valid_depths <= q3)]
+                            mean_adj = iqr_adj.mean() if len(iqr_adj) > 0 else adj_valid_depths.mean()
+                            means.append(mean_adj)
 
                 if means:
                     row_mean = np.mean(means)
@@ -393,10 +386,11 @@ class RGBDepthProcessor:
 
     def inpaint_depth_by_columnwise_mean(self, depth, mask, max_depth=1.5):
         """
-        Inpaint missing values in depth using column-wise IQR mean for lying children.
-        - If >10% of column is missing, sample randomly in (mean-0.05, mean+0.05).
-        - Otherwise, use normal IQR mean.
-        - If the entire column is missing, check adjacent columns (left or right) for valid depth and adjust.
+        Inpaint missing values in depth using column-wise IQR mean.
+        - If <10% of column is missing, fill with column IQR mean.
+        - If ≥10% and <100% missing, sample from IQR mean ± 0.1.
+        - If the entire column is missing, use adjacent columns with same logic.
+        - If adjacent columns are also missing, sample from overall mask mean ± 0.1.
         """
         inpainted = depth.copy()
         height, width = depth.shape
@@ -404,7 +398,7 @@ class RGBDepthProcessor:
         mask_valid = (mask > 0)
         depth_valid = (depth > 0) & (depth <= max_depth)
         overall_valid_mask = mask_valid & depth_valid
-        overall_mask_mean = depth[overall_valid_mask].mean() if np.any(overall_valid_mask) else 0
+        overall_mask_mean = depth[overall_valid_mask].mean() if np.any(overall_valid_mask) else 0.0
 
         rng = np.random.default_rng()
 
@@ -423,46 +417,39 @@ class RGBDepthProcessor:
                 iqr_values = col_valid_depths[(col_valid_depths >= q1) & (col_valid_depths <= q3)]
                 col_mean = iqr_values.mean() if len(iqr_values) > 0 else col_valid_depths.mean()
 
-                if missing_ratio > 0.1:
-                    # Sample randomly around the overall_mask_mean
-                    low = overall_mask_mean - 0.05
-                    high = overall_mask_mean + 0.05
-                    sampled_values = rng.uniform(low, high, size=np.sum(missing_col))
-                else:
+                if missing_ratio < 0.1:
                     sampled_values = np.full(np.sum(missing_col), col_mean)
+                else:
+                    sampled_values = rng.uniform(col_mean - 0.1, col_mean + 0.1, size=np.sum(missing_col))
+
             else:
-                # Entire column invalid — check adjacent columns (left or right)
-                left = col - 1 if col > 0 else None
-                right = col + 1 if col < width - 1 else None
+                # Entire column missing
                 means = []
-                if left is not None:
-                    valid_left = mask_valid[:, left] & (depth[:, left] > 0) & (depth[:, left] < max_depth)
-                    if np.any(valid_left):
-                        left_depths = depth[:, left][valid_left]
-                        q1_left = np.percentile(left_depths, 25)
-                        q3_left = np.percentile(left_depths, 75)
-                        iqr_left = left_depths[(left_depths >= q1_left) & (left_depths <= q3_left)]
-                        means.append(iqr_left.mean() if len(iqr_left) > 0 else left_depths.mean())
-                if right is not None:
-                    valid_right = mask_valid[:, right] & (depth[:, right] > 0) & (depth[:, right] < max_depth)
-                    if np.any(valid_right):
-                        right_depths = depth[:, right][valid_right]
-                        q1_right = np.percentile(right_depths, 25)
-                        q3_right = np.percentile(right_depths, 75)
-                        iqr_right = right_depths[(right_depths >= q1_right) & (right_depths <= q3_right)]
-                        means.append(iqr_right.mean() if len(iqr_right) > 0 else right_depths.mean())
+                for adj_col in [col - 1, col + 1]:
+                    if 0 <= adj_col < width:
+                        adj_mask = mask_valid[:, adj_col]
+                        adj_depth = depth[:, adj_col]
+                        valid_adj = adj_mask & (adj_depth > 0) & (adj_depth <= max_depth)
+                        if np.any(valid_adj):
+                            adj_valid_depths = adj_depth[valid_adj]
+                            q1 = np.percentile(adj_valid_depths, 25)
+                            q3 = np.percentile(adj_valid_depths, 75)
+                            iqr_adj = adj_valid_depths[(adj_valid_depths >= q1) & (adj_valid_depths <= q3)]
+                            mean_adj = iqr_adj.mean() if len(iqr_adj) > 0 else adj_valid_depths.mean()
+                            means.append(mean_adj)
 
                 if means:
                     col_mean = np.mean(means)
                 else:
                     col_mean = overall_mask_mean
 
-                sampled_values = rng.uniform(col_mean - 0.05, col_mean + 0.05, size=np.sum(missing_col))
+                sampled_values = rng.uniform(col_mean - 0.1, col_mean + 0.1, size=np.sum(missing_col))
 
             missing_indices = np.where(missing_col)[0]
             inpainted[missing_indices, col] = sampled_values
 
         return inpainted
+
 
     def inpaint_depth_by_interpolation(self, depth, child_mask, max_depth):
         """
@@ -595,8 +582,311 @@ class RGBDepthProcessor:
 
         # Return the overlaid image
         return combined
+
+    def compute_average(self, values, mode='mean'):
+        """
+        Compute average depth using mean or IQR-based mean.
+
+        Args:
+            values (np.array): Array of depth values.
+            mode (str): 'mean' or 'iqr_mean'
+
+        Returns:
+            float: Average value.
+        """
+        if mode == 'mean':
+            return np.mean(values)
+        elif mode == 'iqr_mean':
+            # Using np.percentile to compute Q1 and Q3 efficiently
+            q1, q3 = np.percentile(values, [25, 75])
+            iqr_mask = (values >= q1) & (values <= q3)
+            filtered_values = values[iqr_mask]
+            if len(filtered_values) == 0:
+                return np.mean(values)  # fallback to mean if no inliers
+            return np.mean(filtered_values)
+        else:
+            raise ValueError("avg_mode must be 'mean' or 'iqr_mean'")
+
+    def calculate_corrected_distance(self, depth_map, mask, angle_deg, mode, avg_mode='mean'):
+        """
+        Calculate perpendicular distance from depth using angle correction.
+
+        Args:
+            depth_map (np.array): Depth map in meters.
+            mask (np.array): Binary mask for the object.
+            angle_deg (float): Tilt angle (negative = downward).
+            mode (str): 'parallel' or 'perpendicular'
+            avg_mode (str): 'mean' or 'iqr_mean'
+
+        Returns:
+            float: Corrected perpendicular distance (rounded to 3 decimals).
+        """
+        if mask is None or np.sum(mask) == 0:  # Check for invalid mask
+            return None
+
+        # Vectorized application of mask
+        values = depth_map[mask]
+        avg_depth = self.compute_average(values, avg_mode)
+        angle_rad = np.radians(abs(angle_deg))
+
+        # Vectorized distance calculation
+        if mode == 'parallel':
+            corrected = avg_depth * np.cos(angle_rad)
+        elif mode == 'perpendicular':
+            corrected = avg_depth * np.sin(angle_rad)
+        else:
+            corrected = avg_depth
+
+        return round(corrected, 3)
+
+    def calculate_all_distances(self, depth_map, child_mask, floor_mask=None, wall_mask=None,
+                                camera_tilt_deg=0.0, child_position='standing', avg_mode='mean'):
+        """
+        Compute corrected distances to child, wall, and floor.
+
+        Args:
+            depth_map (np.array): Depth map in meters.
+            child_mask (np.array): Binary mask for child.
+            floor_mask (np.array): Binary mask for floor.
+            wall_mask (np.array): Binary mask for wall.
+            camera_tilt_deg (float): Tilt angle in degrees (negative = downward).
+            child_position (str): 'standing' or 'lying'
+            avg_mode (str): 'mean' or 'iqr_mean'
+
+        Returns:
+            dict: Distances {'child': d1, 'wall': d2, 'floor': d3}
+        """
+        distances = {}
+
+        # Calculate child, wall, and floor distances based on child position
+        if child_position == 'standing':
+            distances['child'] = self.calculate_corrected_distance(depth_map, child_mask, camera_tilt_deg, 'parallel', avg_mode)
+            distances['wall'] = self.calculate_corrected_distance(depth_map, wall_mask, camera_tilt_deg, 'parallel', avg_mode)
+            distances['floor'] = self.calculate_corrected_distance(depth_map, floor_mask, camera_tilt_deg, 'perpendicular', avg_mode)
+        else:  # lying
+            distances['child'] = self.calculate_corrected_distance(depth_map, child_mask, camera_tilt_deg, 'parallel', avg_mode)
+            distances['floor'] = self.calculate_corrected_distance(depth_map, floor_mask, camera_tilt_deg, 'parallel', avg_mode)
+            distances['wall'] = None
+
+        return distances
+
+    def _find_valid_depth_neighborhood(self, depth, u, v, search_radius=3, depth_scale=1.0):
+        """
+        Find the nearest valid (finite, >0) depth sample in a growing neighborhood around (u, v).
+        Returns (xk, yk, z_meters) or (None, None, None) if not found.
+        """
+        H, W = depth.shape
+        u0, v0 = int(u), int(v)
+
+        for r in range(search_radius + 1):
+            ys = np.arange(max(0, v0 - r), min(H, v0 + r + 1))
+            xs = np.arange(max(0, u0 - r), min(W, u0 + r + 1))
+
+            uu, vv = np.meshgrid(xs, ys, indexing="xy")
+            coords = np.stack([uu.ravel(), vv.ravel()], axis=1)
+
+            dists = np.sqrt((coords[:, 0] - u0) ** 2 + (coords[:, 1] - v0) ** 2)
+            order = np.argsort(dists)
+
+            for idx in order:
+                xk, yk = int(coords[idx, 0]), int(coords[idx, 1])
+                z_raw = depth[yk, xk]
+                if z_raw is None:
+                    continue
+                z = float(z_raw) / float(depth_scale)
+                if z > 0 and np.isfinite(z):
+                    return xk, yk, z
+
+        return None, None, None
+
+    # ----------------------
+    # NEW: child height from mask (match-x strategy)
+    # ----------------------
+    def compute_child_height_from_mask_matchx(
+        self,
+        rgb,
+        depth,
+        mask,
+        fx=925.9, fy=925.5, cx=640.0, cy=360.0,
+        depth_scale=1.0,
+        display=False,
+        row_search_max=10,
+        depth_neighborhood=3
+    ):
+        """
+        Compute child body-length using head (top row median-x) and foot (same x at bottom row).
+        Returns: float height in meters, or None if not computable.
+        """
+        ys, xs = np.where(mask > 0)
+        if xs.size == 0:
+            return None
+
+        y_min_raw, y_max_raw = int(np.min(ys)), int(np.max(ys))
+
+        def _nearest_row_with_mask(mask_in, start_row, max_search=10):
+            if 0 <= start_row < mask_in.shape[0] and np.any(mask_in[start_row, :]):
+                return start_row
+            for d in range(1, max_search + 1):
+                r1 = start_row + d
+                r2 = start_row - d
+                if r1 < mask_in.shape[0] and np.any(mask_in[r1, :]):
+                    return r1
+                if r2 >= 0 and np.any(mask_in[r2, :]):
+                    return r2
+            return None
+
+        y_min = _nearest_row_with_mask(mask, y_min_raw, max_search=row_search_max)
+        y_max = _nearest_row_with_mask(mask, y_max_raw, max_search=row_search_max)
+        if y_min is None or y_max is None:
+            return None
+
+        xs_top = np.where(mask[y_min, :] > 0)[0]
+        if xs_top.size == 0:
+            return None
+
+        x_head = int(np.median(xs_top))
+        y_head = int(y_min)
+        x_foot, y_foot = x_head, int(y_max)
+
+        uh, vh, zh = self._find_valid_depth_neighborhood(
+            depth, x_head, y_head, search_radius=depth_neighborhood, depth_scale=depth_scale
+        )
+        uf, vf, zf = self._find_valid_depth_neighborhood(
+            depth, x_foot, y_foot, search_radius=depth_neighborhood, depth_scale=depth_scale
+        )
+
+        if zh is None or zf is None:
+            return None
+
+        def to_3d(u, v, z):
+            X = (u - cx) * z / fx
+            Y = (v - cy) * z / fy
+            return np.array([X, Y, z], dtype=float)
+
+        head_3d = to_3d(uh, vh, zh)
+        foot_3d = to_3d(uf, vf, zf)
+
+        height_m = float(np.linalg.norm(foot_3d - head_3d))
+
+        if display and rgb is not None:
+            vis = rgb.copy()
+            cv2.circle(vis, (int(uh), int(vh)), 5, (0, 255, 0), -1)   # head
+            cv2.circle(vis, (int(uf), int(vf)), 5, (0, 0, 255), -1)   # foot
+            cv2.line(vis, (int(uh), int(vh)), (int(uf), int(vf)), (255, 255, 0), 1)
+            cv2.putText(vis, f"Height: {height_m:.2f} m", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            plt.imshow(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
+            plt.axis("off")
+            plt.show()
+
+        return height_m
+
+    # ----------------------
+    # NEW: zero statistics on depth map
+    # ----------------------
+    def compute_zero_statistics(self, depth_map, frac_threshold=0.75):
+        """
+        Compute zero statistics for a depth map.
+
+        Parameters
+        ----------
+        depth_map : np.ndarray
+            Input 2D array.
+        frac_threshold : float
+            Fraction of zeros in a row/column to count it as "zero".
+            Example: 0.75 means rows/cols with >=75% zeros are counted.
+
+        Returns
+        -------
+        dict
+        """
+        total_elements = depth_map.size
+
+        zero_values = np.count_nonzero(depth_map == 0)
+        zero_percent = (zero_values / total_elements) * 100
+
+        row_zero_frac = np.count_nonzero(depth_map == 0, axis=1) / depth_map.shape[1]
+        zero_rows_all = np.sum(row_zero_frac >= frac_threshold)
+        zero_rows_all_percent = (zero_rows_all / depth_map.shape[0]) * 100
+
+        col_zero_frac = np.count_nonzero(depth_map == 0, axis=0) / depth_map.shape[0]
+        zero_cols_all = np.sum(col_zero_frac >= frac_threshold)
+        zero_cols_all_percent = (zero_cols_all / depth_map.shape[1]) * 100
+
+        return {
+            "zero_count": int(zero_values),
+            "zero_percent": float(zero_percent),
+            "zero_rows_all": int(zero_rows_all),
+            "zero_rows_all_percent": float(zero_rows_all_percent),
+            "zero_cols_all": int(zero_cols_all),
+            "zero_cols_all_percent": float(zero_cols_all_percent),
+        }
+
+    # ----------------------
+    # NEW: save RGB-D point cloud (Open3D) with default intrinsics
+    # ----------------------
+    def save_rgbd_pointcloud(
+        self,
+        rgb,
+        depth,
+        fx=925.9, fy=925.5, cx=640.0, cy=360.0,
+        scan_id="child", frame_idx=0, filename=None
+    ):
+        """
+        Create and save a point cloud from aligned RGB and depth images.
+
+        Args:
+            rgb: HxWx3 numpy array (uint8, aligned with depth)
+            depth: HxW numpy array (float in meters or convertible)
+            fx, fy: focal lengths
+            cx, cy: principal point
+            scan_id: identifier for naming output file
+            frame_idx: identifier for naming output file
+            filename: optional filename (if None, auto-generated)
+        """
+        if rgb.dtype != np.uint8:
+            rgb_vis = np.clip(rgb, 0, 255).astype(np.uint8)
+        else:
+            rgb_vis = rgb
+
+        points = []
+        H, W = depth.shape
+        for v in range(H):
+            for u in range(W):
+                Z = float(depth[v, u])
+                if Z > 0 and np.isfinite(Z):
+                    X = (u - cx) * Z / fx
+                    Y = (v - cy) * Z / fy
+                    R, G, B = rgb_vis[v, u]
+                    points.append([X, Y, Z, R, G, B])
+
+        if len(points) == 0:
+            print("No valid depth points found!")
+            return
+
+        points = np.array(points, dtype=float)
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points[:, :3])          # XYZ
+        pcd.colors = o3d.utility.Vector3dVector(points[:, 3:] / 255.0)  # RGB normalized
+
+        if filename is None:
+            filename = f"output_{scan_id}_{frame_idx}.ply"
+
+        o3d.io.write_point_cloud(filename, pcd)
+        print(f"Point cloud saved to {filename}")
+
+
 '''
 # Sample Usage
+
+child_position = "lying" 
+#child_position = "standing" 
+if child_position == "lying":
+    max_depth = 1.5
+else:
+    max_depth = 3.0
+depth = np.clip(depth, 0, max_depth)
 
 # Instantiate
 proc = RGBDepthProcessor()
